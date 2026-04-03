@@ -18,7 +18,7 @@ SCOPE = (
 )
 
 CACHE_PATH    = os.path.join(os.path.dirname(__file__), ".spotifycache")
-POLL_INTERVAL = 1.0
+POLL_INTERVAL = 0.1
 
 # Сколько следующих треков предзагружаем (обложки)
 PRELOAD_COUNT = 2
