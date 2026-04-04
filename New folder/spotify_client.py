@@ -3,9 +3,12 @@ import time
 import requests
 import io
 import os
+import webbrowser
 import pygame
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 CLIENT_ID     = "b3a484a1c5c34919b0e56eaf02a28526"
 CLIENT_SECRET = "eb939d66fda746a091b094ca56f149a7"
@@ -21,8 +24,73 @@ SCOPE = (
 )
 
 CACHE_PATH    = os.path.join(os.path.dirname(__file__), ".spotifycache")
-POLL_INTERVAL = 1.0      # НЕ снижать ниже 1.0 — rate limit Spotify API
+POLL_INTERVAL = 1.0
 PRELOAD_COUNT = 2
+
+
+# ===== АВТО-АВТОРИЗАЦИЯ (без вставки URL вручную) =====
+
+_auth_code      = None
+_auth_code_lock = threading.Lock()
+
+
+class _CallbackHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        global _auth_code
+        params = parse_qs(urlparse(self.path).query)
+        with _auth_code_lock:
+            if "code" in params:
+                _auth_code = params["code"][0]
+                body = (b"<html><body style='font-family:sans-serif;text-align:center;margin-top:80px'>"
+                        b"<h2>&#10003; Authorization successful!</h2>"
+                        b"<p>You can close this tab and return to the app.</p>"
+                        b"</body></html>")
+            else:
+                body = b"<html><body><h2>Authorization failed.</h2></body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass   # тихий режим
+
+
+def _do_auth_flow(auth_manager: SpotifyOAuth):
+    """
+    Открывает браузер на страницу авторизации Spotify,
+    запускает временный HTTP-сервер на :8888,
+    ловит redirect с кодом и сохраняет токен в кэш.
+    Пользователю не нужно ничего копировать вручную.
+    """
+    global _auth_code
+    with _auth_code_lock:
+        _auth_code = None
+
+    auth_url = auth_manager.get_authorize_url()
+    webbrowser.open(auth_url)
+    print("Открываю браузер для авторизации Spotify...")
+
+    try:
+        server = HTTPServer(("127.0.0.1", 8888), _CallbackHandler)
+        server.timeout = 120   # ждём не дольше 2 минут
+        server.handle_request()
+    except OSError as e:
+        print("Auth server error:", e)
+        return
+
+    with _auth_code_lock:
+        code = _auth_code
+
+    if code is None:
+        print("Авторизация не завершена (таймаут или ошибка)")
+        return
+
+    try:
+        auth_manager.get_access_token(code, as_dict=False, check_cache=False)
+        print("Авторизация Spotify успешна, токен сохранён.")
+    except Exception as e:
+        print("Token exchange error:", e)
 
 
 class SpotifyClient(threading.Thread):
@@ -54,16 +122,20 @@ class SpotifyClient(threading.Thread):
 
         self.last_poll = time.time()
 
-        self.sp = spotipy.Spotify(
-            auth_manager=SpotifyOAuth(
-                client_id=CLIENT_ID,
-                client_secret=CLIENT_SECRET,
-                redirect_uri=REDIRECT_URI,
-                scope=SCOPE,
-                cache_path=CACHE_PATH,
-                open_browser=not os.path.exists(CACHE_PATH)
-            )
+        auth_manager = SpotifyOAuth(
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+            redirect_uri=REDIRECT_URI,
+            scope=SCOPE,
+            cache_path=CACHE_PATH,
+            open_browser=False,   # управляем сами
         )
+
+        # Если кэша нет — запускаем авто-авторизацию через браузер
+        if not os.path.exists(CACHE_PATH):
+            _do_auth_flow(auth_manager)
+
+        self.sp = spotipy.Spotify(auth_manager=auth_manager)
 
         self.start()
 
@@ -94,53 +166,49 @@ class SpotifyClient(threading.Thread):
         """Загружает плейлисты + сохранённые альбомы. Запускается один раз при старте."""
         items = []
 
-        # --- Плейлисты ---
         try:
             offset = 0
             while True:
                 res   = self.sp.current_user_playlists(limit=50, offset=offset)
                 batch = res.get("items", [])
                 for pl in batch:
-                    if not pl:
-                        continue
-                    name      = pl.get("name", "")
-                    owner     = pl.get("owner", {}).get("display_name", "")
-                    uri       = pl.get("uri", "")
+                    if not pl: continue
                     images    = pl.get("images") or []
                     cover_url = images[0]["url"] if images else None
-                    cover     = self._fetch_cover(cover_url) if cover_url else None
-                    items.append({"name": name, "artist": owner,
-                                  "uri": uri, "cover": cover, "type": "playlist"})
+                    items.append({
+                        "name":   pl.get("name", ""),
+                        "artist": pl.get("owner", {}).get("display_name", ""),
+                        "uri":    pl.get("uri", ""),
+                        "cover":  self._fetch_cover(cover_url) if cover_url else None,
+                        "type":   "playlist",
+                    })
                 offset += len(batch)
                 if offset >= res.get("total", 0) or not batch:
                     break
-            print(f"Playlists loaded: {sum(1 for i in items if i.get('type')=='playlist')}")
+            print(f"Playlists loaded: {sum(1 for i in items if i['type']=='playlist')}")
         except Exception as e:
             print("Playlists load error:", e)
-            if "scope" in str(e).lower() or "403" in str(e):
-                with self.lock:
-                    self._albums_status = "error"
-                    self._albums_error  = "Удали .spotifycache и перезапусти (новые права)"
 
-        # --- Сохранённые альбомы ---
         try:
             offset = 0
             while True:
                 res   = self.sp.current_user_saved_albums(limit=50, offset=offset)
                 batch = res.get("items", [])
                 for item in batch:
-                    album  = item["album"]
-                    uri    = album["uri"]
-                    images = album.get("images", [])
+                    album     = item["album"]
+                    images    = album.get("images", [])
                     cover_url = images[0]["url"] if images else None
-                    cover     = self._fetch_cover(cover_url) if cover_url else None
-                    items.append({"name":   album["name"],
-                                  "artist": album["artists"][0]["name"],
-                                  "uri": uri, "cover": cover, "type": "album"})
+                    items.append({
+                        "name":   album["name"],
+                        "artist": album["artists"][0]["name"],
+                        "uri":    album["uri"],
+                        "cover":  self._fetch_cover(cover_url) if cover_url else None,
+                        "type":   "album",
+                    })
                 offset += len(batch)
                 if offset >= res.get("total", 0) or not batch:
                     break
-            print(f"Saved albums loaded: {sum(1 for i in items if i.get('type')=='album')}")
+            print(f"Saved albums loaded: {sum(1 for i in items if i['type']=='album')}")
         except Exception as e:
             print("Saved albums load error:", e)
 
@@ -154,8 +222,6 @@ class SpotifyClient(threading.Thread):
 
     def run(self):
         prev_memory = []
-
-        # Грузим библиотеку в отдельном потоке чтобы не блокировать poll
         threading.Thread(target=self._load_library, daemon=True).start()
 
         while True:
