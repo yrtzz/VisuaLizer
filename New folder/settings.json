@@ -1,9 +1,9 @@
 {
   "device": 30,
-  "sensitivity": 3.0,
+  "sensitivity": 0.3,
   "always_on_top": true,
   "hide_ui": false,
   "hide_silent": true,
-  "win_w": 1200,
-  "win_h": 800
+  "win_w": 900,
+  "win_h": 600
 }

@@ -235,11 +235,8 @@ class AlbumCarousel:
         self.target_y = 0 if self.open else -CAROUSEL_PH
 
     def set_albums(self, albums):
-        # Сравниваем по uri — не сравниваем pygame.Surface напрямую
-        new_uris = [a["uri"] for a in albums]
-        old_uris = [a["uri"] for a in self.albums]
-        if new_uris != old_uris:
-            self.albums      = albums
+        if albums and albums != self.albums:
+            self.albums = albums
             self.cover_cache = {}
 
     def _get_cover(self, album):
@@ -351,15 +348,8 @@ class AlbumCarousel:
         pygame.draw.line(screen, (60,60,100), (0, py+CAROUSEL_PH-1), (W, py+CAROUSEL_PH-1))
 
         if not self.albums:
-            status, err_msg = spotify.get_albums_status() if 'spotify' in globals() else ("loading", "")
-            if status == "error":
-                msg_text, msg_col = err_msg or "Ошибка загрузки", (220, 80, 80)
-            elif status == "empty":
-                msg_text, msg_col = "Нет плейлистов и альбомов в медиатеке", (120, 120, 150)
-            else:
-                msg_text, msg_col = "Загрузка медиатеки...", (120, 120, 150)
-            msg = font_small.render(msg_text, True, msg_col)
-            screen.blit(msg, (W//2 - msg.get_width()//2, py + CAROUSEL_PH//2 - 8))
+            msg = font_small.render("Загрузка альбомов...", True, (120,120,150))
+            screen.blit(msg, (W//2 - msg.get_width()//2, py+CAROUSEL_PH//2-8))
             return
 
         # рисуем 3 видимых + частично соседние
@@ -408,12 +398,6 @@ class AlbumCarousel:
             at = font_tiny.render(artist, True, (120,120,150))
             screen.blit(at, (ax + (ALBUM_CARD_W - at.get_width())//2, panel_top + ALBUM_COVER_S + 20))
 
-            # тип: плейлист или альбом
-            kind = album.get("type", "album")
-            badge = "▶ playlist" if kind == "playlist" else "◉ album"
-            bt = font_tiny.render(badge, True, (70, 100, 160))
-            screen.blit(bt, (ax + (ALBUM_CARD_W - bt.get_width())//2, panel_top + ALBUM_COVER_S + 32))
-
         screen.set_clip(old_clip)
 
         # индикатор скролла
@@ -429,7 +413,7 @@ class AlbumCarousel:
 
 # ===== SETTINGS UI =====
 class SettingsUI:
-    PW, PH = 580, 440
+    PW, PH = 580, 510
     TAB_AUDIO, TAB_MIXER = 0, 1
 
     def __init__(self):
@@ -519,6 +503,7 @@ class SettingsUI:
         return self.open
 
     def _click_audio(self, ex, ey, p, cy):
+        global screen, is_fullscreen
         cx = p.x+20
         for i, (did, _) in enumerate(self.devices[self.dev_scroll:self.dev_scroll+4]):
             if pygame.Rect(cx, cy+22+i*26, self.PW-40, 22).collidepoint(ex, ey):
@@ -536,6 +521,21 @@ class SettingsUI:
             if pygame.Rect(p.x+self.PW-62, ty0+i*36, 44, 22).collidepoint(ex, ey):
                 settings[key] = not settings[key]
                 if key == "always_on_top": set_always_on_top(settings["always_on_top"])
+                return
+        # window size presets
+        wy0    = ty0 + 3*36 + 18
+        btn_w  = (self.PW - 44) // 4 - 6
+        presets = [(900,600),(1280,720),(1600,900),(1920,1080)]
+        for i, (pw, ph) in enumerate(presets):
+            bx = cx + i * (btn_w + 8)
+            if pygame.Rect(bx, wy0+18, btn_w, 34).collidepoint(ex, ey):
+                settings["win_w"] = pw
+                settings["win_h"] = ph
+                if not is_fullscreen:
+                    screen = pygame.display.set_mode(
+                        (pw, ph), pygame.RESIZABLE | pygame.DOUBLEBUF)
+                    if settings["always_on_top"]:
+                        set_always_on_top(True)
                 return
 
     def _drag_sens(self, mx, p):
@@ -627,6 +627,29 @@ class SettingsUI:
             ty=ty0+i*36
             screen.blit(font_small.render(lbl,True,(190,190,215)),(cx,ty+3))
             self._toggle(p.x+self.PW-62,ty,settings[key])
+
+        # --- Window Size presets ---
+        wy0 = ty0 + 3*36 + 18
+        self._label(cx, wy0, "WINDOW SIZE")
+        presets = [(900,600),(1280,720),(1600,900),(1920,1080)]
+        labels  = ["900×600","1280×720","1600×900","1920×1080"]
+        notes   = ["compact","bars fit ✓","comfortable ✓","full HD ✓"]
+        btn_w   = (self.PW - 44) // 4 - 6
+        for i, ((pw, ph), lbl, note) in enumerate(zip(presets, labels, notes)):
+            bx  = cx + i * (btn_w + 8)
+            by  = wy0 + 18
+            sel = (settings["win_w"] == pw and settings["win_h"] == ph)
+            hov = pygame.Rect(bx, by, btn_w, 34).collidepoint(mx, my)
+            col_bg = (50,100,190,180) if sel else ((45,45,72,140) if hov else (28,28,46,120))
+            col_bd = (80,140,255) if sel else ((70,70,110) if hov else (45,45,70))
+            bs = pygame.Surface((btn_w, 34), pygame.SRCALPHA)
+            bs.fill(col_bg)
+            screen.blit(bs, (bx, by))
+            pygame.draw.rect(screen, col_bd, (bx, by, btn_w, 34), 1, border_radius=5)
+            lt = font_tiny.render(lbl,  True, (255,255,255) if sel else (190,190,215))
+            nt = font_tiny.render(note, True, (80,200,120)  if "✓" in note else (110,110,140))
+            screen.blit(lt, (bx + (btn_w - lt.get_width())//2, by + 3))
+            screen.blit(nt, (bx + (btn_w - nt.get_width())//2, by + 18))
 
     def _draw_mixer(self,p,cy,mx,my):
         if not PYCAW_OK:
@@ -1010,7 +1033,10 @@ while running:
     else:
         info=spotify.get_info(); update_track(info)
 
-    album_carousel.set_albums(spotify.get_albums())
+    # обновляем альбомы если загрузились
+    albums = spotify.get_albums()
+    if albums:
+        album_carousel.set_albums(albums)
 
     values = process_audio()
     draw(info, values)
