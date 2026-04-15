@@ -1,0 +1,21 @@
+# PyInstaller
+dist/
+build/
+*.spec.bak
+__pycache__/
+*.pyc
+*.pyo
+
+# Spotify auth cache — у каждого своя
+.spotifycache
+
+# Настройки — у каждого свои
+settings.json
+
+# Временные иконки
+BeatOn.ico
+
+# IDE
+.vscode/
+.idea/
+*.swp

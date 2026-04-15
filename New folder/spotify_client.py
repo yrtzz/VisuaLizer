@@ -28,7 +28,7 @@ POLL_INTERVAL = 1.0
 PRELOAD_COUNT = 2
 
 
-# ===== АВТО-АВТОРИЗАЦИЯ (без вставки URL вручную) =====
+# ===== АВТО-АВТОРИЗАЦИЯ =====
 
 _auth_code      = None
 _auth_code_lock = threading.Lock()
