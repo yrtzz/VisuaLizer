@@ -3,7 +3,7 @@
   "sensitivity": 3.0,
   "always_on_top": true,
   "hide_ui": false,
-  "hide_silent": false,
-  "win_w": 900,
-  "win_h": 600
+  "hide_silent": true,
+  "win_w": 1280,
+  "win_h": 720
 }

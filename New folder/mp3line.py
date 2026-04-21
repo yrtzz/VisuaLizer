@@ -10,6 +10,15 @@ import os
 
 from spotify_client import SpotifyClient
 
+# DPI-awareness — чёткие шрифты на HiDPI / 4K мониторах (fix #2)
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor v1
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
 try:
     from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
     PYCAW_OK = True
@@ -21,7 +30,7 @@ BARS       = 64
 SAMPLERATE = 44100
 BLOCKSIZE  = 1024
 ROW_HEIGHT = 30
-FORCE_REFRESH_DELAY = 0.4
+FORCE_REFRESH_DELAY = 0.15     # было 0.4 — быстрее обновление при переключении
 
 VK_MEDIA_PLAY_PAUSE = 0xB3
 VK_MEDIA_NEXT_TRACK = 0xB0
@@ -56,13 +65,45 @@ screen = pygame.display.set_mode(
     (settings["win_w"], settings["win_h"]),
     pygame.RESIZABLE | pygame.DOUBLEBUF
 )
-pygame.display.set_caption("Music Visualizer")
+pygame.display.set_caption("mp3line")
+
+# Иконка приложения — программная (fix #6)
+_icon = pygame.Surface((32, 32), pygame.SRCALPHA)
+_icon.fill((0, 0, 0, 0))
+pygame.draw.circle(_icon, (20, 20, 38), (16, 16), 15)
+pygame.draw.circle(_icon, (80, 140, 255), (16, 16), 14, 2)
+pygame.draw.line(_icon,   (80, 140, 255), (13, 7),  (13, 20), 2)
+pygame.draw.line(_icon,   (80, 140, 255), (13, 7),  (21, 5),  2)
+pygame.draw.line(_icon,   (80, 140, 255), (21, 5),  (21, 17), 2)
+pygame.draw.circle(_icon, (80, 140, 255), (11, 21), 3)
+pygame.draw.circle(_icon, (80, 140, 255), (19, 18), 3)
+pygame.display.set_icon(_icon)
 clock = pygame.time.Clock()
 
-font       = pygame.font.SysFont("Segoe UI", 18)
-font_small = pygame.font.SysFont("Segoe UI", 14)
-font_tiny  = pygame.font.SysFont("Segoe UI", 12)
-font_bold  = pygame.font.SysFont("Segoe UI", 16, bold=True)
+font       = pygame.font.SysFont("Segoe UI", 19)
+font_small = pygame.font.SysFont("Segoe UI", 15)
+font_tiny  = pygame.font.SysFont("Segoe UI", 13)
+font_bold  = pygame.font.SysFont("Segoe UI", 17, bold=True)
+
+# ===== SCALING (fix #5) =====
+def calc_radius(W, H):
+    """Радиус центрального круга — умеренный рост с окном.
+    900×600 → 120,  1280×720 → 144,  1920×1080 → 190 (макс)."""
+    factor = min(W / 900.0, H / 600.0)
+    return max(80, min(190, int(120 * factor)))
+
+# 3 набора шрифтов для имён треков: base / mid / large
+_FSET = [
+    (pygame.font.SysFont("Segoe UI", 19), pygame.font.SysFont("Segoe UI", 15)),  # ×1.0
+    (pygame.font.SysFont("Segoe UI", 22), pygame.font.SysFont("Segoe UI", 17)),  # ×1.15
+    (pygame.font.SysFont("Segoe UI", 26), pygame.font.SysFont("Segoe UI", 20)),  # ×1.35
+]
+
+def _track_fonts(sf: float):
+    """Возвращает (font_main, font_next) под текущий scale factor."""
+    if sf >= 1.35: return _FSET[2]
+    if sf >= 1.15: return _FSET[1]
+    return _FSET[0]
 
 is_fullscreen = False
 
@@ -75,12 +116,50 @@ def set_always_on_top(enable):
     except:
         pass
 
+def center_window(w, h):
+    """Центрирует окно на экране (fix #7)."""
+    try:
+        hwnd = pygame.display.get_wm_info()["window"]
+        sw = ctypes.windll.user32.GetSystemMetrics(0)
+        sh = ctypes.windll.user32.GetSystemMetrics(1)
+        x  = max(0, (sw - w) // 2)
+        y  = max(0, (sh - h) // 2)
+        ctypes.windll.user32.SetWindowPos(hwnd, 0, x, y, w, h, 0x0040)
+    except Exception:
+        pass
+
+# Последние данные для быстрой перерисовки после смены режима (fix #9.6)
+_last_draw_state: dict = {"info": None, "values": None}
+
+def toggle_fullscreen():
+    """Переключает полноэкранный режим + мгновенная перерисовка (fix #9.6)."""
+    global screen, is_fullscreen
+    is_fullscreen = not is_fullscreen
+    if is_fullscreen:
+        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN | pygame.DOUBLEBUF)
+    else:
+        screen = pygame.display.set_mode(
+            (settings["win_w"], settings["win_h"]), pygame.RESIZABLE | pygame.DOUBLEBUF)
+        center_window(settings["win_w"], settings["win_h"])
+    if settings["always_on_top"]:
+        set_always_on_top(True)
+    # Немедленная перерисовка — убирает чёрный кадр (fix #9.6)
+    if _last_draw_state["info"] is not None:
+        v = _last_draw_state["values"]
+        if v is None:
+            v = np.zeros(BARS)
+        draw(_last_draw_state["info"], v)
+        pygame.display.flip()
+
 def send_media_key(vk):
     ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
     ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
 
 if settings["always_on_top"]:
     set_always_on_top(True)
+
+# Центрируем окно при запуске (fix #7)
+center_window(settings["win_w"], settings["win_h"])
 
 # ===== AUDIO =====
 audio_buffer = np.zeros(BLOCKSIZE)
@@ -413,7 +492,7 @@ class AlbumCarousel:
 
 # ===== SETTINGS UI =====
 class SettingsUI:
-    PW, PH = 580, 510
+    PW, PH = 660, 560    # было 580×510 — увеличено чтобы UI не вылезал (fix #1)
     TAB_AUDIO, TAB_MIXER = 0, 1
 
     def __init__(self):
@@ -426,6 +505,9 @@ class SettingsUI:
         self.mix_scroll   = 0
         self.mix_drag     = None
         self.mix_last_ref = 0
+        self.muted_vols: dict[str, float] = {}   # имя→громкость до заглушки (fix #4)
+        self._fade_alpha  = 0.0                  # 0..255, анимация появления (fix #9.5)
+        self._fade_target = 0.0
         self._scan_devices()
 
     def _scan_devices(self):
@@ -457,6 +539,7 @@ class SettingsUI:
 
     def toggle(self):
         self.open = not self.open
+        self._fade_target = 255.0 if self.open else 0.0
         if self.open:
             self._scan_devices()
 
@@ -473,9 +556,9 @@ class SettingsUI:
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             ex, ey = event.pos
             if pygame.Rect(p.right-30, p.top+8, 22, 22).collidepoint(ex, ey):
-                self.open = False; save_settings(settings); return True
+                self.open = False; self._fade_target = 0.0; save_settings(settings); return True
             if not p.collidepoint(ex, ey):
-                self.open = False; save_settings(settings); return True
+                self.open = False; self._fade_target = 0.0; save_settings(settings); return True
             tab_y = p.top+40; tw = self.PW//2
             if pygame.Rect(p.x, tab_y, tw, 28).collidepoint(ex, ey):    self.tab = self.TAB_AUDIO
             if pygame.Rect(p.x+tw, tab_y, tw, 28).collidepoint(ex, ey): self.tab = self.TAB_MIXER
@@ -513,7 +596,7 @@ class SettingsUI:
                     except: pass
                 stream_ref[0] = make_stream(did)
                 return
-        sy = cy+140; sx = cx+110; sw = self.PW-150
+        sy = cy+140; sx = cx+110; sw = self.PW-205   # синхронизировано с _draw_audio
         if pygame.Rect(sx-5, sy, sw+10, 20).collidepoint(ex, ey):
             self.sens_drag = True; self._drag_sens(ex, self._panel()); return
         ty0 = sy+42
@@ -534,24 +617,51 @@ class SettingsUI:
                 if not is_fullscreen:
                     screen = pygame.display.set_mode(
                         (pw, ph), pygame.RESIZABLE | pygame.DOUBLEBUF)
+                    center_window(pw, ph)      # центрировать после смены размера (fix #7)
                     if settings["always_on_top"]:
                         set_always_on_top(True)
                 return
 
     def _drag_sens(self, mx, p):
-        sx = p.x+130; sw = self.PW-150
+        sx = p.x+130; sw = self.PW-205   # синхронизировано
         frac = max(0.0, min(1.0, (mx-sx)/sw))
         settings["sensitivity"] = round(0.3 + frac*2.7, 2)
 
     def _click_mixer(self, ex, ey, p, cy):
-        vis = self._visible(); sx = p.x+150; sw = self.PW-170; row_h = 40
+        vis = self._visible()
+        sx  = p.x + 195          # сдвинуто вправо под кнопку заглушки (fix #3)
+        sw  = self.PW - 260      # короче (fix #3)
+        row_h = 40
         for i, s in enumerate(vis[self.mix_scroll:self.mix_scroll+7]):
             abs_i = i + self.mix_scroll
-            if pygame.Rect(sx, cy+i*row_h+8, sw, 18).inflate(0,8).collidepoint(ex,ey):
-                frac = max(0.0, min(1.0, (ex-sx)/sw))
+            ry    = cy + i * row_h
+
+            # --- кнопка заглушки (fix #4) ---
+            mute_rect = pygame.Rect(p.x + 20, ry + 9, 22, 22)
+            if mute_rect.collidepoint(ex, ey):
+                name = s["name"]
+                if name in self.muted_vols:
+                    # возвращаем прежний уровень
+                    prev = self.muted_vols.pop(name)
+                    try: s["_ctl"].SetMasterVolume(prev, None); s["volume"] = prev
+                    except: pass
+                else:
+                    # запоминаем и заглушаем
+                    self.muted_vols[name] = s["volume"]
+                    try: s["_ctl"].SetMasterVolume(0.0, None); s["volume"] = 0.0
+                    except: pass
+                return
+
+            # --- слайдер ---
+            if pygame.Rect(sx, ry + 8, sw, 18).inflate(0, 8).collidepoint(ex, ey):
+                frac = max(0.0, min(1.0, (ex - sx) / sw))
                 try: s["_ctl"].SetMasterVolume(frac, None); s["volume"] = frac
                 except: pass
-                self.mix_drag = (abs_i, sx, sw); return
+                self.mix_drag = (abs_i, sx, sw)
+                # если перетаскиваем — снимаем заглушку для этого канала
+                if s["name"] in self.muted_vols:
+                    self.muted_vols.pop(s["name"])
+                return
 
     def _drag_mix(self, mx):
         if self.mix_drag is None: return
@@ -563,15 +673,23 @@ class SettingsUI:
             except: pass
 
     def draw(self):
-        if not self.open: return
+        # анимация появления/скрытия (fix #9.5)
+        self._fade_alpha += (self._fade_target - self._fade_alpha) * 0.18
+        if self._fade_alpha < 1.0:
+            return
+        fade = min(1.0, self._fade_alpha / 255.0)
+
         if self.tab == self.TAB_MIXER: self._refresh_mixer()
         W, H   = screen.get_size()
         p      = self._panel()
         mx, my = pygame.mouse.get_pos()
 
-        dim = pygame.Surface((W,H), pygame.SRCALPHA); dim.fill((0,0,0,150))
+        dim = pygame.Surface((W,H), pygame.SRCALPHA)
+        dim.fill((0,0,0, int(150 * fade)))
         screen.blit(dim, (0,0))
-        ps = pygame.Surface((self.PW,self.PH), pygame.SRCALPHA); ps.fill((16,16,26,235))
+
+        ps = pygame.Surface((self.PW,self.PH), pygame.SRCALPHA)
+        ps.fill((16,16,26, int(235 * fade)))
         screen.blit(ps, (p.x,p.y))
         pygame.draw.rect(screen,(55,55,80),p,1,border_radius=10)
 
@@ -614,7 +732,7 @@ class SettingsUI:
             pygame.draw.rect(screen,(120,120,180),(p.right-12,cy+20+by,4,bh),border_radius=2)
 
         sy=cy+130; self._label(cx,sy,"SENSITIVITY")
-        ssx=cx+110; ssw=self.PW-155
+        ssx=cx+110; ssw=self.PW-205     # было PW-155 — оставляем место для метки и скроллбара
         frac=(settings["sensitivity"]-0.3)/2.7
         self._slider(ssx,sy+14,ssw,frac,mx,my,f"{settings['sensitivity']:.1f}×")
 
@@ -654,16 +772,41 @@ class SettingsUI:
     def _draw_mixer(self,p,cy,mx,my):
         if not PYCAW_OK:
             screen.blit(font_small.render("pip install pycaw comtypes",True,(200,90,90)),(p.x+20,cy+20)); return
-        vis=self._visible(); sx=p.x+150; sw=self.PW-170; row_h=40
+        vis = self._visible()
+        sx    = p.x + 195        # сдвинуто для кнопки заглушки (fix #3)
+        sw    = self.PW - 260    # короче (fix #3)
+        row_h = 40
         if not vis:
             screen.blit(font_small.render("Нет активных сессий",True,(130,130,155)),(p.x+20,cy+20)); return
-        for i,s in enumerate(vis[self.mix_scroll:self.mix_scroll+7]):
-            ry=cy+i*row_h
-            screen.blit(font_small.render(s["name"][:20],True,(195,195,220)),(p.x+20,ry+12))
-            self._slider(sx,ry+18,sw,s["volume"],mx,my,f"{int(s['volume']*100)}%")
-        tot=len(vis)
-        if tot>7:
-            bh=max(20,7/tot*(7*row_h)); by=self.mix_scroll/(tot-7)*(7*row_h-bh)
+        for i, s in enumerate(vis[self.mix_scroll:self.mix_scroll+7]):
+            ry   = cy + i * row_h
+            name = s["name"]
+            is_muted = name in self.muted_vols
+
+            # кнопка заглушки (fix #4)
+            btn_rect = pygame.Rect(p.x + 20, ry + 9, 22, 22)
+            btn_hov  = btn_rect.collidepoint(mx, my)
+            btn_col  = (200, 55, 55) if is_muted else ((70, 160, 70) if btn_hov else (55, 120, 55))
+            pygame.draw.rect(screen, btn_col, btn_rect, border_radius=4)
+            # иконка: X (заглушено) или маленькие полоски (активно)
+            bx, by = btn_rect.x, btn_rect.y
+            if is_muted:
+                pygame.draw.line(screen, (255,255,255), (bx+5, by+5), (bx+17, by+17), 2)
+                pygame.draw.line(screen, (255,255,255), (bx+17, by+5), (bx+5, by+17), 2)
+            else:
+                for lx, lh in [(bx+5,8),(bx+9,12),(bx+13,8),(bx+17,5)]:
+                    pygame.draw.line(screen,(255,255,255),(lx, by+11-lh//2),(lx, by+11+lh//2),2)
+
+            # название приложения
+            screen.blit(font_small.render(name[:16], True, (195,195,220)), (p.x+48, ry+12))
+
+            # слайдер (используем текущий volume)
+            vol = 0.0 if is_muted else s["volume"]
+            self._slider(sx, ry+18, sw, vol, mx, my, f"{int(s['volume']*100)}%")
+
+        tot = len(vis)
+        if tot > 7:
+            bh = max(20, 7/tot*(7*row_h)); by = self.mix_scroll/(tot-7)*(7*row_h-bh)
             pygame.draw.rect(screen,(55,55,80),(p.right-12,cy,4,7*row_h),border_radius=2)
             pygame.draw.rect(screen,(120,120,180),(p.right-12,cy+by,4,bh),border_radius=2)
 
@@ -683,6 +826,7 @@ class SettingsUI:
 
 
 # ===== STATE =====
+# radius пересчитывается в main loop при каждом изменении размера окна (fix #5)
 radius       = 120
 cover_radius = radius - 3
 
@@ -704,6 +848,9 @@ old_cover           = None
 
 list_offset       = 0.0
 is_list_animating = False
+
+# Стабильные «следующие треки» — обновляются только при смене трека (fix #9.1)
+_stable_next_tracks: list = []
 
 pending_refresh = False
 refresh_after   = 0.0
@@ -755,6 +902,7 @@ def update_track(info, force=False):
     global cached_track, cached_cover, cached_bg, cached_bloom, main_color
     global is_transitioning, transition_progress, old_cover
     global is_list_animating, list_offset, cached_raw_cover
+    global _stable_next_tracks
 
     name  = info["name"]
     cover = info["cover"]
@@ -772,6 +920,9 @@ def update_track(info, force=False):
     cached_cover = make_circle_cover(cover, cover_radius)
     cached_bloom = create_bloom(radius, main_color)
 
+    # Обновляем стабильный список следующих треков (fix #9.1)
+    _stable_next_tracks = list(info.get("next", []))
+
     transition_progress = 0.0
     is_transitioning    = True
     list_offset         = float(ROW_HEIGHT)
@@ -788,6 +939,7 @@ def on_prev():
 
 def on_play_pause():
     send_media_key(VK_MEDIA_PLAY_PAUSE)
+    force_refresh_later()   # мгновенное обновление UI (fix #9.3)
 
 def on_next():
     send_media_key(VK_MEDIA_NEXT_TRACK); force_refresh_later()
@@ -809,13 +961,14 @@ def draw(info, values):
     W, H = screen.get_size()
     cx   = W // 2
     cy   = H // 2
-    dyn  = radius * max(0.5, pulse_value)  # защита от нулевого размера
+    sf   = radius / 120.0                         # scale factor (fix #5)
+    dyn  = radius * max(0.5, pulse_value)
 
     name        = info["name"]
     artist      = info["artist"]
     progress    = info["progress"]
     duration    = info["duration"]
-    next_tracks = info.get("next", [])
+    next_tracks = _stable_next_tracks   # стабильный список — без мерцания (fix #9.1)
     is_playing  = info.get("is_playing", is_playing)
 
     # background
@@ -862,17 +1015,19 @@ def draw(info, values):
 
     track_list  = [("cur",(name,artist))]
     track_list += [("nxt",t) for t in next_tracks[:2]]
+    f_cur, f_nxt = _track_fonts(sf)             # масштабированные шрифты (fix #5)
+    row_h    = max(ROW_HEIGHT, int(ROW_HEIGHT * sf))
     base_y   = 20
     old_clip = screen.get_clip()
-    screen.set_clip(pygame.Rect(0, 0, W//2, base_y + ROW_HEIGHT*5))
+    screen.set_clip(pygame.Rect(0, 0, W//2, base_y + row_h*5))
     for i,(typ,(t,a)) in enumerate(track_list):
-        y    = base_y + i*ROW_HEIGHT + int(list_offset)
+        y    = base_y + i*row_h + int(list_offset)
         line = f"{t} — {a}"
         if typ=="cur":
-            txt = font.render(line, True, (255,255,255))
+            txt = f_cur.render(line, True, (255,255,255))
         else:
             fade=max(0,130-i*30)
-            txt=font_small.render(line,True,(200,200,200)); txt.set_alpha(fade)
+            txt=f_nxt.render(line,True,(200,200,200)); txt.set_alpha(fade)
         screen.blit(txt,(20,y))
     screen.set_clip(old_clip)
 
@@ -887,9 +1042,9 @@ def draw(info, values):
                  flipped=album_carousel.open,
                  color=(200,200,230), alpha=chev_alpha)
 
-    # progress bar
+    # progress bar — позиция и ширина масштабируются с радиусом (fix #5)
     if duration > 0:
-        bar_w = radius*2+40; bx=cx-bar_w//2; by=cy+radius+60
+        bar_w = int(radius*2 + 40*sf); bx=cx-bar_w//2; by=cy+radius+int(60*sf)
         frac  = min(1.0, progress/duration)
         _prog_bar_rect = pygame.Rect(bx,by,bar_w,10)
         hover  = _prog_bar_rect.inflate(0,16).collidepoint(mx,my)
@@ -900,8 +1055,10 @@ def draw(info, values):
         screen.blit(font_small.render(time.strftime('%M:%S',time.gmtime(progress)),True,(170,170,170)),(bx,by+14))
         screen.blit(font_small.render(time.strftime('%M:%S',time.gmtime(duration)),True,(170,170,170)),(bx+bar_w-38,by+14))
 
-    # control buttons
-    btn_y=cy+radius+108; btn_sz=9; btn_gap=55
+    # control buttons — размер и отступы масштабируются (fix #5)
+    btn_y   = cy + radius + int(108 * sf)
+    btn_sz  = int(9  * max(1.0, sf))
+    btn_gap = int(55 * max(1.0, sf))
     bsurf=pygame.Surface((W,H),pygame.SRCALPHA)
     for key,bxb in [("prev",cx-btn_gap),("play",cx),("next",cx+btn_gap)]:
         hov=math.hypot(mx-bxb,my-btn_y)<btn_sz*2.5
@@ -940,10 +1097,12 @@ def _draw_visualizer(cx, cy, dyn, W, H):
         x1=cx+math.cos(angle)*dyn; y1=cy+math.sin(angle)*dyn
         x2=cx+math.cos(angle)*(dyn+v); y2=cy+math.sin(angle)*(dyn+v)
         pygame.draw.line(screen,(120,180,255),(x1,y1),(x2,y2),2)
-    bw=W//BARS
+    bw = W / BARS           # float — бары точно заполняют всю ширину
     for i in range(BARS):
-        h=int(heights[i])
-        pygame.draw.rect(screen,(80,140,255),(i*bw,H-h,bw-2,h))
+        h = int(heights[i])
+        x = int(i * bw)
+        w = int((i + 1) * bw) - x
+        pygame.draw.rect(screen, (80,140,255), (x, H-h, max(1, w-1), h))
 
 
 # ===== SPOTIFY =====
@@ -980,13 +1139,7 @@ while running:
                 elif album_carousel.open:
                     album_carousel.toggle()
             elif event.key == pygame.K_F11:
-                is_fullscreen = not is_fullscreen
-                if is_fullscreen:
-                    screen=pygame.display.set_mode((0,0),pygame.FULLSCREEN|pygame.DOUBLEBUF)
-                else:
-                    screen=pygame.display.set_mode(
-                        (settings["win_w"],settings["win_h"]),pygame.RESIZABLE|pygame.DOUBLEBUF)
-                if settings["always_on_top"]: set_always_on_top(True)
+                toggle_fullscreen()   # fix #9.6
             elif event.key == pygame.K_SPACE: on_play_pause()
             elif event.key == pygame.K_RIGHT: on_next()
             elif event.key == pygame.K_LEFT:  on_prev()
@@ -997,7 +1150,10 @@ while running:
 
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             ex,ey   = event.pos
-            btn_y   = cy+radius+108; btn_gap=55; btn_sz=9
+            sf_ev   = radius / 120.0
+            btn_y   = cy + radius + int(108 * sf_ev)   # масштаб (fix #5)
+            btn_gap = int(55 * max(1.0, sf_ev))
+            btn_sz  = int(9  * max(1.0, sf_ev))
             gear_x  = W-26; gear_y=22
             fs_x    = W-52; fs_y=22
             chev_x  = cx
@@ -1006,13 +1162,7 @@ while running:
             if math.hypot(ex-gear_x,ey-gear_y)<18:
                 settings_ui.toggle()
             elif math.hypot(ex-fs_x,ey-fs_y)<14:
-                is_fullscreen=not is_fullscreen
-                if is_fullscreen:
-                    screen=pygame.display.set_mode((0,0),pygame.FULLSCREEN|pygame.DOUBLEBUF)
-                else:
-                    screen=pygame.display.set_mode(
-                        (settings["win_w"],settings["win_h"]),pygame.RESIZABLE|pygame.DOUBLEBUF)
-                if settings["always_on_top"]: set_always_on_top(True)
+                toggle_fullscreen()   # fix #9.6
             elif abs(ex-chev_x)<34 and abs(ey-chev_y)<18:
                 album_carousel.toggle()
             elif not settings["hide_ui"]:
@@ -1024,7 +1174,17 @@ while running:
 
         elif event.type == pygame.VIDEORESIZE:
             if not is_fullscreen:
-                settings["win_w"],settings["win_h"] = event.w, event.h
+                settings["win_w"], settings["win_h"] = event.w, event.h
+
+    # Пересчёт радиуса при смене размера окна (fix #5)
+    _new_r = calc_radius(W, H)
+    if _new_r != radius:
+        radius       = _new_r
+        cover_radius = radius - 3
+        if cached_raw_cover:
+            cached_cover = make_circle_cover(cached_raw_cover, cover_radius)
+            cached_bloom = create_bloom(radius, main_color)
+            cached_bg    = rebuild_bg(cached_raw_cover)
 
     # refresh
     if pending_refresh and time.time()>=refresh_after:
@@ -1040,6 +1200,8 @@ while running:
 
     values = process_audio()
     draw(info, values)
+    _last_draw_state["info"]   = info     # для мгновенной перерисовки (fix #9.6)
+    _last_draw_state["values"] = values
 
     pygame.display.flip()
     pygame.event.pump()
